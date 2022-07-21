@@ -303,7 +303,7 @@ def main(exp, args):
     #     trt_file = None
     #     decoder = None
 
-    predictor = PredictorV5(model_path = "/home/ubuntu/yolov5/yolox-mousefinder/defaults_all_mousefinder_001/weights/best.pt",
+    predictor = PredictorV5(model_path = args.ckpt,
                             conf =exp.test_conf,
                             iou = 0.4)
     current_time = time.localtime()
