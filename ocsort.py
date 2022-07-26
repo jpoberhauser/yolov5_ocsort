@@ -4,6 +4,7 @@
 from __future__ import print_function
 
 import numpy as np
+import cv2
 from .association import *
 
 
@@ -172,6 +173,111 @@ ASSO_FUNCS = {  "iou": iou_batch,
                 "ct_dist": ct_dist}
 
 
+
+
+def draw_bbox(
+    img, 
+    bbox,
+    color,
+    gap= True,
+):
+    """Draws a box on an image with a given color.
+    # Arguments
+        image     : The image to draw on.
+        box       : A list of 4 elements (x1, y1, x2, y2).
+        color     : The color of the box.
+    """
+
+    # Calculate image dimensions
+    dims = sorted(img.shape, reverse=True)
+    
+    # corner thickness is linearly correlated with the smaller image dimension.
+    # We use the smaller image dimension rather than image area so as to avoid
+    # overly thick lines for large non-square images prior to transforming
+    # images. We set lower and upper bounds for corner thickness.
+    min_corner = 1
+    max_corner = 15
+    corner_thickness = int(0.005 * dims[1] + min_corner)
+    if corner_thickness > max_corner:
+        corner_thickness = int(max_corner)
+
+    corner_length = int(0.021 * dims[1] + 2.25)
+
+    # inner thickness of bboxes with corners
+    inner_thickness = int(1 + 0.0005 * dims[1])
+
+    # bbox thickness of bboxes without corners
+    min_bbox = 1
+    max_bbox = 8
+    bbox_thickness = int(0.0041 * dims[1] - 0.0058)
+    if bbox_thickness < min_bbox:
+        bbox_thickness = min_bbox
+    if bbox_thickness > max_bbox:
+        bbox_thickness = int(max_bbox)
+
+    if gap == False:
+        xyxy = tuple(np.array(bbox.xyxy, dtype=int))
+        cv2.rectangle(img, xyxy[:2], xyxy[2:], color, bbox_thickness, cv2.LINE_AA)
+        return img
+
+    xmin, ymin, xmax, ymax = bbox[0], bbox[1], bbox[2], bbox[3]
+
+    points = [0] * 12
+    points[0] = (xmin, ymin + corner_length)
+    points[1] = (xmin, ymin)
+    points[2] = (xmin + corner_length, ymin)
+
+    points[3] = (xmax - corner_length, ymin)
+    points[4] = (xmax, ymin)
+    points[5] = (xmax, ymin + corner_length)
+
+    points[6] = (xmax, ymax - corner_length)
+    points[7] = (xmax, ymax)
+    points[8] = (xmax - corner_length, ymax)
+
+    points[9] = (xmin + corner_length, ymax)
+    points[10] = (xmin, ymax)
+    points[11] = (xmin, ymax - corner_length)
+
+    for i in range(2):
+        for j in range(2):
+            cv2.line(
+                img,
+                points[i * 6 + j * 4],
+                points[i * 6 + j * 4 + 1],
+                color,
+                corner_thickness,
+                cv2.LINE_AA,
+            )
+            cv2.line(
+                img,
+                points[i * 3 + 1],
+                points[10 - 3 * i],
+                color,
+                inner_thickness,
+                cv2.LINE_4,
+            )
+    for i in range(2):
+        for j in range(2):
+            cv2.line(
+                img,
+                points[i * 6 + j * 2 + 1],
+                points[i * 6 + j * 2 + 2],
+                color,
+                corner_thickness,
+                cv2.LINE_4,
+            )
+            cv2.line(
+                img,
+                points[6 * i + 1],
+                points[i * 6 + 4],
+                color,
+                inner_thickness,
+                cv2.LINE_AA,
+            )
+
+    return img  
+
 class OCSort(object):
     def __init__(self, det_thresh, max_age=30, min_hits=3, 
         iou_threshold=0.3, delta_t=3, asso_func="iou", inertia=0.2, use_byte=False):
@@ -190,7 +296,7 @@ class OCSort(object):
         self.use_byte = use_byte
         KalmanBoxTracker.count = 0
 
-    def update(self, output_results, img_info, img_size):
+    def update(self, output_results, img_info, img_size, full_img_info, img):
         """
         Params:
           dets - a numpy array of detections in the format [[x1,y1,x2,y2,score],[x1,y1,x2,y2,score],...]
@@ -332,6 +438,29 @@ class OCSort(object):
         if(len(ret) > 0):
             return np.concatenate(ret)
         return np.empty((0, 5))
+
+
+        """
+           Visualize Association / prediction at time t for t+1 plus boxes at time t+1
+        """
+        # new_name = f"/home/ubuntu/trackers/OC_SORT/temp_assoc/{str(full_img_info['id']).zfill(5)}.jpg"
+
+        # fr = img.copy()
+        # offset = 0
+        # for inner_det, inner_tracker_update, inner_iou in zip(detections, trackers, iou_matrix):
+        #     inner_tracker_update = [int(x) for x in inner_tracker_update]
+        #     inner_det = [int(x) for x in inner_det]
+        #     fr = draw_bbox(fr, inner_det[:4],color = (0,0,255) )
+        #     fr = draw_bbox(fr, inner_tracker_update[:4],color = (0,255,255) )
+        #     fr = cv2.putText(fr, str(inner_iou) , (200,400+offset), cv2.FONT_HERSHEY_SIMPLEX, 
+        #             3, (0, 0, 255), 3, cv2.LINE_AA)
+        #     offset += 200
+   
+        # cv2.imwrite(new_name, fr)
+
+
+
+        
 
     def update_public(self, dets, cates, scores):
         self.frame_count += 1

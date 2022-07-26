@@ -6,6 +6,7 @@ import cv2
 import torch
 import numpy as np
 import yolov5
+import json
 from loguru import logger
 
 from yolox.data.data_augment import preproc
@@ -28,7 +29,7 @@ def get_image_list(path):
             ext = osp.splitext(apath)[1]
             if ext in IMAGE_EXT:
                 image_names.append(apath)
-    return image_names
+    return sorted(image_names)
 
 
 class Predictor(object):
@@ -97,8 +98,8 @@ class PredictorV5(object):
         self.conf = conf
         self.iou = iou
 
-    def inference(self, img, timer):
-        img_info = {"id": 0}
+    def inference(self, img, timer, frame_id):
+        img_info = {"id": frame_id}
         if isinstance(img, str):
             img_info["file_name"] = osp.basename(img)
             img = cv2.imread(img)
@@ -122,10 +123,72 @@ class PredictorV5(object):
             boxes_int = torch.tensor([[int(v) for v in box] for box in boxes])
             scores = torch.tensor(predictions[:,4].tolist())
             outputs = [torch.cat((boxes_int, torch.unsqueeze(scores, dim=1)), 1)]
-            return outputs, img_info
+            return outputs, img_info, img
 
+class Predictor_fromJson(object):
+    def __init__(self, results_path):
+        self.results_path = results_path
+    
+    def inference(self, img_path, timer):
+        self.frame_id = img_path.split("/")[-1]
+        img_info = {"id": self.frame_id }
+        if isinstance(img_path, str):
+            img_info["file_name"] = img_path
+            img = cv2.imread(img_path)
+        else:
+            img_info["file_name"] = None
+        
+        height, width = img.shape[:2]
+        img_info["height"] = height
+        img_info["width"] = width
+        img_info["raw_img"] = img
+        img_info["ratio"] = .999999
+        ### read_json
+        # image_id = img_path.replace(".jpg", ".json")
+        with open(f'{self.results_path}/outs_{self.frame_id.replace(".jpg", ".json")}') as json_file:
+            preds = json.load(json_file)
+        return [torch.tensor(preds['bboxes'])[:,:5]], img_info, img
+
+class PredictorFromDB(object):
+    def __init__(self, model_path, conf, iou):
+        self.model_path = model_path
+        self.model = yolov5.load(self.model_path)
+        self.conf = conf
+        self.iou = iou
+
+    def inference(self, img, timer, frame_id):
+        img_info = {"id": frame_id}
+        if isinstance(img, str):
+            img_info["file_name"] = osp.basename(img)
+            img = cv2.imread(img)
+        else:
+            img_info["file_name"] = None
+        
+        height, width = img.shape[:2]
+        img_info["height"] = height
+        img_info["width"] = width
+        img_info["raw_img"] = img
+        img_info["ratio"] = .999999
+        #img, ratio = preprocess_v5(img, self.test_size, self.rgb_means, self.std)
+        self.model.conf = self.conf
+        results = self.model(img)
+        timer.tic()
+        predictions = results.pred[0]
+        if len(predictions)==0:
+            return [None], img_info
+        else:
+            boxes = predictions[:, :4].tolist()
+            boxes_int = torch.tensor([[int(v) for v in box] for box in boxes])
+            scores = torch.tensor(predictions[:,4].tolist())
+            outputs = [torch.cat((boxes_int, torch.unsqueeze(scores, dim=1)), 1)]
+            return outputs, img_info, img
 
 def image_demo(predictor, vis_folder, current_time, args):
+    width = 1014
+    height = 760
+    vid_writer = cv2.VideoWriter(
+        args.out_path, cv2.VideoWriter_fourcc(*"mp4v"), 15, (int(width), int(height))
+    )
     if osp.isdir(args.path):
         files = get_image_list(args.path)
     else:
@@ -136,9 +199,9 @@ def image_demo(predictor, vis_folder, current_time, args):
     results = []
 
     for frame_id, img_path in enumerate(files, 1):
-        outputs, img_info = predictor.inference(img_path, timer)
+        outputs, img_info, img = predictor.inference(img_path, timer, frame_id)
         if outputs[0] is not None:
-            online_targets = tracker.update(outputs[0], [img_info['height'], img_info['width']], exp.test_size)
+            online_targets = tracker.update(outputs[0], [img_info['height'], img_info['width']], exp.test_size, img_info, img)
             online_tlwhs = []
             online_ids = []
             for t in online_targets:
@@ -164,7 +227,8 @@ def image_demo(predictor, vis_folder, current_time, args):
             timestamp = time.strftime("%Y_%m_%d_%H_%M_%S", current_time)
             save_folder = osp.join(vis_folder, timestamp)
             os.makedirs(save_folder, exist_ok=True)
-            cv2.imwrite(osp.join(save_folder, osp.basename(img_path)), online_im)
+            cv2.imwrite(osp.join(save_folder, osp.basename(img_path)), cv2.cvtColor(online_im, cv2.COLOR_BGR2RGB))
+            vid_writer.write(cv2.cvtColor(online_im, cv2.COLOR_BGR2RGB))
 
         if frame_id % 20 == 0:
             logger.info('Processing frame {} ({:.2f} fps)'.format(frame_id, 1. / max(1e-5, timer.average_time)))
@@ -196,7 +260,9 @@ def imageflow_demo(predictor, vis_folder, current_time, args):
     vid_writer = cv2.VideoWriter(
         save_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (int(width), int(height))
     )
-    tracker = OCSort(det_thresh=args.track_thresh, iou_threshold=args.iou_thresh, use_byte=args.use_byte)
+    tracker = OCSort(det_thresh=args.track_thresh,
+     iou_threshold=args.iou_thresh,
+      use_byte=args.use_byte)
     timer = Timer()
     frame_id = 0
     results = []
@@ -205,9 +271,9 @@ def imageflow_demo(predictor, vis_folder, current_time, args):
             logger.info('Processing frame {} ({:.2f} fps)'.format(frame_id, 1. / max(1e-5, timer.average_time)))
         ret_val, frame = cap.read()
         if ret_val:
-            outputs, img_info = predictor.inference(frame, timer)
+            outputs, img_info, img = predictor.inference(frame, timer, frame_id)
             if outputs[0] is not None:
-                online_targets = tracker.update(outputs[0], [img_info['height'], img_info['width']], exp.test_size)
+                online_targets = tracker.update(outputs[0], [img_info['height'], img_info['width']], exp.test_size, img_info, img)
                 online_tlwhs = []
                 online_ids = []
                 for t in online_targets:
@@ -303,10 +369,13 @@ def main(exp, args):
     #     trt_file = None
     #     decoder = None
 
-    predictor = PredictorV5(model_path = args.ckpt,
+    predictor = PredictorV5(model_path = "/home/ubuntu/yolov5/yolox-mousefinder/defaults_all_mousefinder_001/weights/best.pt",
                             conf =exp.test_conf,
                             iou = 0.4)
+    print("args.path", args.path)
+    predictor_imgs = Predictor_fromJson(results_path = args.path)
     current_time = time.localtime()
+
     if args.demo_type == "image":
         image_demo(predictor, vis_folder, current_time, args)
     elif args.demo_type == "video" or args.demo_type == "webcam":
